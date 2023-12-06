@@ -61,12 +61,21 @@ function vi-dir-marks::sync(){
 
 	# write out new global marks
 	if (($#dir_marks)) {
+		dir_marks=("${(@kv)dir_marks[(R)?*]}")
 		[[ -d ${marks_file:h} ]] || mkdir -p ${marks_file:h}
 		printf '%q\n' "${(@kv)dir_marks[(I)[[:upper:]]]}" >| $marks_file
 		zcompile $marks_file
 	}
 
 	add-zsh-hook -d zshexit vi-dir-marks::sync
+}
+
+function vi-dir-marks::delete(){
+	emulate -L zsh
+	local mark=${1:?}
+	dir_marks[$mark]=''
+	vi-dir-marks::sync
+	unset "dir_marks[$mark]"
 }
 
 function vi-dir-marks::list(){
