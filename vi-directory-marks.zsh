@@ -1,32 +1,15 @@
-(){
-	emulate -L zsh
-
-	typeset -gA dir_marks
-	[[ -r ${VI_DIR_MARKS__CACHE_FILE:="${XDG_CACHE_HOME:-$HOME/.cache}/vi-dir-marks.cache.zsh"} ]] &&
-		source $VI_DIR_MARKS__CACHE_FILE
-
-	autoload add-zsh-hook
-	zmodload zsh/datetime
-	zmodload zsh/sched
-	zmodload zsh/system
-	add-zsh-hook zshexit vi-dir-marks::sync
-
-	zle -N mark-dir vi-dir-marks::mark
-	zle -N jump-dir vi-dir-marks::jump
-	zle -N marks    vi-dir-marks::list
-
-	bindkey -M vicmd 'm' mark-dir "'" jump-dir '`' jump-dir
-}
-
 function vi-dir-marks::mark(){
 	emulate -L zsh
+	local delay
+	zstyle -s ':plugin:vi-directory-marks' sync-delay delay || delay=30
 
 	local REPLY
 	[[ -n ${REPLY:=$1} ]] || read -k1
 	dir_marks[$REPLY]=${${2:a}:-$PWD}
 	# schedule cache writeout
 	if [[ $REPLY = [[:upper:]] && ! ${(M)zsh_scheduled_events:#*vi-dir-marks::sync} ]]; then
-		sched +${VI_DIR_MARkS__SYNC_SECONDS:=30} vi-dir-marks::sync
+		add-zsh-hook zshexit vi-dir-marks::sync
+		sched +$delay vi-dir-marks::sync
 	fi
 }
 
@@ -45,33 +28,76 @@ function vi-dir-marks::jump(){
 
 function vi-dir-marks::sync(){
 	emulate -L zsh
-	local -i fd
-	if [[ ! $1 = noflock ]] && zsystem supports flock; then
-		zsystem flock -f fd $VI_DIR_MARKS__CACHE_FILE
-		($funcstack[-1] noflock)
-		zsystem flock -u $fd
-		return
-	fi
-	local -A old=(${(kv)dir_marks})
-	source $VI_DIR_MARKS__CACHE_FILE
-	local k v changed
-	# overwrite new global marks
-	dir_marks+=("${(@kv)old[(I)[[:upper:]]]}")
+	local marks_file
+	zstyle -s ':plugin:vi-directory-marks' marks-file marks_file ||
+		marks_file="${XDG_STATE_HOME:-${XDG_DATA_HOME:-$HOME/.local/data}}/zsh/vi-dir-marks.cache"
+
+	local -i fd period
+	if [[ $1 != noflock ]] {
+		if { zstyle -s ':plugin:vi-directory-marks' period period && [[ ! ${(M)zsh_scheduled_events:#*vi-dir-marks::sync periodic} ]] } {
+			sched +$period vi-dir-marks::sync periodic
+		}
+
+		if { zsystem supports flock } {
+			[[ -d ${marks_file:h} ]] || mkdir -p ${marks_file:h} || return
+			[[ -e $marks_file ]] || touch $marks_file || return
+			zsystem flock -f fd $marks_file || return
+			{
+				vi-dir-marks::sync noflock
+				return
+			} always {
+				zsystem flock -u fd
+			}
+		}
+	}
+
+	# read global marks from file; retaining ones in current shell
+	typeset -Ag dir_marks
+	local file_marks
+	[[ -r $marks_file ]] &&
+		file_marks="$(<$marks_file)" &&
+		[[ -n "$file_marks" ]] &&
+		dir_marks=("${(@fQ)file_marks}" "${(@kv)dir_marks}")
+
 	# write out new global marks
-	typeset -p dir_marks >| $VI_DIR_MARKS__CACHE_FILE
-	zcompile $VI_DIR_MARKS__CACHE_FILE
-	# join local marks
-	dir_marks+=("${(@kv)old[(I)^[[:upper:]]]}")
+	if (($#dir_marks)) {
+		[[ -d ${marks_file:h} ]] || mkdir -p ${marks_file:h}
+		printf '%q\n' "${(@kv)dir_marks[(I)[[:upper:]]]}" >| $marks_file
+		zcompile $marks_file
+	}
+
+	add-zsh-hook -d zshexit vi-dir-marks::sync
 }
 
 function vi-dir-marks::list(){
 	emulate -L zsh
-	# TODO: find a better solution than | column | column
-	printf '%s: %q\n' ${(kv)dir_marks#?*:}|
-		column -c$COLUMNS |
-		column -t
+	print -raC2 "${(@kv)dir_marks}"
 	if (($+WIDGET)); then
 		zle .reset-prompt
 		zle -R
 	fi
+}
+
+(){
+	emulate -L zsh
+
+	typeset -gA dir_marks
+
+	autoload add-zsh-hook
+	zmodload zsh/datetime
+	zmodload zsh/sched
+	zmodload zsh/system
+
+	zle -N mark-dir vi-dir-marks::mark
+	zle -N jump-dir vi-dir-marks::jump
+	zle -N marks    vi-dir-marks::list
+
+	bindkey -M vicmd 'm' mark-dir "'" jump-dir '`' jump-dir
+
+	vi-dir-marks::sync noflock
+
+	local period
+	if { zstyle -s ':plugin:vi-directory-marks' period period && [[ ! ${(M)zsh_scheduled_events:#*vi-dir-marks::sync periodic} ]] } {
+		sched +${period} vi-dir-marks::sync periodic
+	}
 }
